@@ -119,29 +119,9 @@ var REGEX_STRING_REGEXP = /^\/(.+)\/([a-z]*)$/;
 // This is used so that it's possible for internal tests to create mock ValidityStates.
 var VALIDITY_STATE_PROPERTY = 'validity';
 
-/**
- * @ngdoc function
- * @name angular.lowercase
- * @module ng
- * @kind function
- *
- * @description Converts the specified string to lowercase.
- * @param {string} string String to be converted to lowercase.
- * @returns {string} Lowercased string.
- */
-var lowercase = function(string) {return isString(string) ? string.toLowerCase() : string;};
 var hasOwnProperty = Object.prototype.hasOwnProperty;
 
-/**
- * @ngdoc function
- * @name angular.uppercase
- * @module ng
- * @kind function
- *
- * @description Converts the specified string to uppercase.
- * @param {string} string String to be converted to uppercase.
- * @returns {string} Uppercased string.
- */
+var lowercase = function(string) {return isString(string) ? string.toLowerCase() : string;};
 var uppercase = function(string) {return isString(string) ? string.toUpperCase() : string;};
 
 
@@ -161,7 +141,7 @@ var manualUppercase = function(s) {
 
 // String#toLowerCase and String#toUpperCase don't produce correct results in browsers with Turkish
 // locale, for this reason we need to detect this case and redefine lowercase/uppercase methods
-// with correct but slower alternatives.
+// with correct but slower alternatives. See https://github.com/angular/angular.js/issues/11387
 if ('i' !== 'I'.toLowerCase()) {
   lowercase = manualLowercase;
   uppercase = manualUppercase;
@@ -204,7 +184,7 @@ function isArrayLike(obj) {
 
   // arrays, strings and jQuery/jqLite objects are array like
   // * jqLite is either the jQuery or jqLite constructor function
-  // * we have to check the existance of jqLite first as this method is called
+  // * we have to check the existence of jqLite first as this method is called
   //   via the forEach method when constructing the jqLite object in the first place
   if (isArray(obj) || isString(obj) || (jqLite && obj instanceof jqLite)) return true;
 
@@ -215,7 +195,8 @@ function isArrayLike(obj) {
   // NodeList objects (with `item` method) and
   // other objects with suitable length characteristics are array-like
   return isNumber(length) &&
-    (length >= 0 && (length - 1) in obj || typeof obj.item == 'function');
+    (length >= 0 && ((length - 1) in obj || obj instanceof Array) || typeof obj.item == 'function');
+
 }
 
 /**
@@ -312,7 +293,7 @@ function forEachSorted(obj, iterator, context) {
  * @returns {function(*, string)}
  */
 function reverseParams(iteratorFn) {
-  return function(value, key) { iteratorFn(key, value); };
+  return function(value, key) {iteratorFn(key, value);};
 }
 
 /**
@@ -360,6 +341,10 @@ function baseExtend(dst, objs, deep) {
           dst[key] = new Date(src.valueOf());
         } else if (isRegExp(src)) {
           dst[key] = new RegExp(src);
+        } else if (src.nodeName) {
+          dst[key] = src.cloneNode(true);
+        } else if (isElement(src)) {
+          dst[key] = src.clone();
         } else {
           if (!isObject(dst[key])) dst[key] = isArray(src) ? [] : {};
           baseExtend(dst[key], [src], true);
@@ -674,9 +659,13 @@ function isPromiseLike(obj) {
 }
 
 
-var TYPED_ARRAY_REGEXP = /^\[object (Uint8(Clamped)?)|(Uint16)|(Uint32)|(Int8)|(Int16)|(Int32)|(Float(32)|(64))Array\]$/;
+var TYPED_ARRAY_REGEXP = /^\[object (?:Uint8|Uint8Clamped|Uint16|Uint32|Int8|Int16|Int32|Float32|Float64)Array\]$/;
 function isTypedArray(value) {
-  return TYPED_ARRAY_REGEXP.test(toString.call(value));
+  return value && isNumber(value.length) && TYPED_ARRAY_REGEXP.test(toString.call(value));
+}
+
+function isArrayBuffer(obj) {
+  return toString.call(obj) === '[object ArrayBuffer]';
 }
 
 
@@ -716,7 +705,7 @@ function isElement(node) {
  * @returns {object} in the form of {key1:true, key2:true, ...}
  */
 function makeMap(str) {
-  var obj = {}, items = str.split(","), i;
+  var obj = {}, items = str.split(','), i;
   for (i = 0; i < items.length; i++) {
     obj[items[i]] = true;
   }
@@ -803,7 +792,7 @@ function copy(source, destination) {
   var stackDest = [];
 
   if (destination) {
-    if (isTypedArray(destination)) {
+    if (isTypedArray(destination) || isArrayBuffer(destination)) {
       throw ngMinErr('cpta', "Can't copy! TypedArray destination cannot be mutated.");
     }
     if (source === destination) {
@@ -877,22 +866,10 @@ function copy(source, destination) {
     }
 
     var needsRecurse = false;
-    var destination;
+    var destination = copyType(source);
 
-    if (isArray(source)) {
-      destination = [];
-      needsRecurse = true;
-    } else if (isTypedArray(source)) {
-      destination = new source.constructor(source);
-    } else if (isDate(source)) {
-      destination = new Date(source.getTime());
-    } else if (isRegExp(source)) {
-      destination = new RegExp(source.source, source.toString().match(/[^\/]*$/)[0]);
-      destination.lastIndex = source.lastIndex;
-    } else if (isFunction(source.cloneNode)) {
-        destination = source.cloneNode(true);
-    } else {
-      destination = Object.create(getPrototypeOf(source));
+    if (destination === undefined) {
+      destination = isArray(source) ? [] : Object.create(getPrototypeOf(source));
       needsRecurse = true;
     }
 
@@ -902,6 +879,45 @@ function copy(source, destination) {
     return needsRecurse
       ? copyRecurse(source, destination)
       : destination;
+  }
+
+  function copyType(source) {
+    switch (toString.call(source)) {
+      case '[object Int8Array]':
+      case '[object Int16Array]':
+      case '[object Int32Array]':
+      case '[object Float32Array]':
+      case '[object Float64Array]':
+      case '[object Uint8Array]':
+      case '[object Uint8ClampedArray]':
+      case '[object Uint16Array]':
+      case '[object Uint32Array]':
+        return new source.constructor(copyElement(source.buffer));
+
+      case '[object ArrayBuffer]':
+        //Support: IE10
+        if (!source.slice) {
+          var copied = new ArrayBuffer(source.byteLength);
+          new Uint8Array(copied).set(new Uint8Array(source));
+          return copied;
+        }
+        return source.slice(0);
+
+      case '[object Boolean]':
+      case '[object Number]':
+      case '[object String]':
+      case '[object Date]':
+        return new source.constructor(source.valueOf());
+
+      case '[object RegExp]':
+        var re = new RegExp(source.source, source.toString().match(/[^\/]*$/)[0]);
+        re.lastIndex = source.lastIndex;
+        return re;
+    }
+
+    if (isFunction(source.cloneNode)) {
+      return source.cloneNode(true);
+    }
   }
 }
 
@@ -965,38 +981,37 @@ function equals(o1, o2) {
   if (o1 === null || o2 === null) return false;
   if (o1 !== o1 && o2 !== o2) return true; // NaN === NaN
   var t1 = typeof o1, t2 = typeof o2, length, key, keySet;
-  if (t1 == t2) {
-    if (t1 == 'object') {
-      if (isArray(o1)) {
-        if (!isArray(o2)) return false;
-        if ((length = o1.length) == o2.length) {
-          for (key = 0; key < length; key++) {
-            if (!equals(o1[key], o2[key])) return false;
-          }
-          return true;
-        }
-      } else if (isDate(o1)) {
-        if (!isDate(o2)) return false;
-        return equals(o1.getTime(), o2.getTime());
-      } else if (isRegExp(o1)) {
-        return isRegExp(o2) ? o1.toString() == o2.toString() : false;
-      } else {
-        if (isScope(o1) || isScope(o2) || isWindow(o1) || isWindow(o2) ||
-          isArray(o2) || isDate(o2) || isRegExp(o2)) return false;
-        keySet = createMap();
-        for (key in o1) {
-          if (key.charAt(0) === '$' || isFunction(o1[key])) continue;
+  if (t1 == t2 && t1 == 'object') {
+    if (isArray(o1)) {
+      if (!isArray(o2)) return false;
+      if ((length = o1.length) == o2.length) {
+        for (key = 0; key < length; key++) {
           if (!equals(o1[key], o2[key])) return false;
-          keySet[key] = true;
-        }
-        for (key in o2) {
-          if (!(key in keySet) &&
-              key.charAt(0) !== '$' &&
-              isDefined(o2[key]) &&
-              !isFunction(o2[key])) return false;
         }
         return true;
       }
+    } else if (isDate(o1)) {
+      if (!isDate(o2)) return false;
+      return equals(o1.getTime(), o2.getTime());
+    } else if (isRegExp(o1)) {
+      if (!isRegExp(o2)) return false;
+      return o1.toString() == o2.toString();
+    } else {
+      if (isScope(o1) || isScope(o2) || isWindow(o1) || isWindow(o2) ||
+        isArray(o2) || isDate(o2) || isRegExp(o2)) return false;
+      keySet = createMap();
+      for (key in o1) {
+        if (key.charAt(0) === '$' || isFunction(o1[key])) continue;
+        if (!equals(o1[key], o2[key])) return false;
+        keySet[key] = true;
+      }
+      for (key in o2) {
+        if (!(key in keySet) &&
+            key.charAt(0) !== '$' &&
+            isDefined(o2[key]) &&
+            !isFunction(o2[key])) return false;
+      }
+      return true;
     }
   }
   return false;
@@ -1173,7 +1188,7 @@ function toJsonReplacer(key, value) {
  * @returns {string|undefined} JSON-ified string representing `obj`.
  */
 function toJson(obj, pretty) {
-  if (typeof obj === 'undefined') return undefined;
+  if (isUndefined(obj)) return undefined;
   if (!isNumber(pretty)) {
     pretty = pretty ? 2 : null;
   }
@@ -1200,7 +1215,10 @@ function fromJson(json) {
 }
 
 
+var ALL_COLONS = /:/g;
 function timezoneToOffset(timezone, fallback) {
+  // IE/Edge do not "understand" colon (`:`) in timezone
+  timezone = timezone.replace(ALL_COLONS, '');
   var requestedTimezoneOffset = Date.parse('Jan 01, 1970 00:00:00 ' + timezone) / 60000;
   return isNaN(requestedTimezoneOffset) ? fallback : requestedTimezoneOffset;
 }
@@ -1215,8 +1233,9 @@ function addDateMinutes(date, minutes) {
 
 function convertTimezoneToLocal(date, timezone, reverse) {
   reverse = reverse ? -1 : 1;
-  var timezoneOffset = timezoneToOffset(timezone, date.getTimezoneOffset());
-  return addDateMinutes(date, reverse * (timezoneOffset - date.getTimezoneOffset()));
+  var dateTimezoneOffset = date.getTimezoneOffset();
+  var timezoneOffset = timezoneToOffset(timezone, dateTimezoneOffset);
+  return addDateMinutes(date, reverse * (timezoneOffset - dateTimezoneOffset));
 }
 
 
@@ -1235,7 +1254,7 @@ function startingTag(element) {
     return element[0].nodeType === NODE_TYPE_TEXT ? lowercase(elemHtml) :
         elemHtml.
           match(/^(<[^>]+>)/)[1].
-          replace(/^<([\w\-]+)/, function(match, nodeName) { return '<' + lowercase(nodeName); });
+          replace(/^<([\w\-]+)/, function(match, nodeName) {return '<' + lowercase(nodeName);});
   } catch (e) {
     return lowercase(elemHtml);
   }
@@ -1383,10 +1402,17 @@ function getNgAttribute(element, ngAttr) {
  * designates the **root element** of the application and is typically placed near the root element
  * of the page - e.g. on the `<body>` or `<html>` tags.
  *
- * Only one AngularJS application can be auto-bootstrapped per HTML document. The first `ngApp`
- * found in the document will be used to define the root element to auto-bootstrap as an
- * application. To run multiple applications in an HTML document you must manually bootstrap them using
- * {@link angular.bootstrap} instead. AngularJS applications cannot be nested within each other.
+ * There are a few things to keep in mind when using `ngApp`:
+ * - only one AngularJS application can be auto-bootstrapped per HTML document. The first `ngApp`
+ *   found in the document will be used to define the root element to auto-bootstrap as an
+ *   application. To run multiple applications in an HTML document you must manually bootstrap them using
+ *   {@link angular.bootstrap} instead.
+ * - AngularJS applications cannot be nested within each other.
+ * - Do not use a directive that uses {@link ng.$compile#transclusion transclusion} on the same element as `ngApp`.
+ *   This includes directives such as {@link ng.ngIf `ngIf`}, {@link ng.ngInclude `ngInclude`} and
+ *   {@link ngRoute.ngView `ngView`}.
+ *   Doing this misplaces the app {@link ng.$rootElement `$rootElement`} and the app's {@link auto.$injector injector},
+ *   causing animations to stop working and making the injector inaccessible from outside the app.
  *
  * You can specify an **AngularJS module** to be used as the root module for the application.  This
  * module will be loaded into the {@link auto.$injector} when the application is bootstrapped. It
@@ -1526,15 +1552,24 @@ function angularInit(element, bootstrap) {
  * @description
  * Use this function to manually start up angular application.
  *
- * See: {@link guide/bootstrap Bootstrap}
- *
- * Note that Protractor based end-to-end tests cannot use this function to bootstrap manually.
- * They must use {@link ng.directive:ngApp ngApp}.
+ * For more information, see the {@link guide/bootstrap Bootstrap guide}.
  *
  * Angular will detect if it has been loaded into the browser more than once and only allow the
  * first loaded script to be bootstrapped and will report a warning to the browser console for
  * each of the subsequent scripts. This prevents strange results in applications, where otherwise
  * multiple instances of Angular try to work on the DOM.
+ *
+ * <div class="alert alert-warning">
+ * **Note:** Protractor based end-to-end tests cannot use this function to bootstrap manually.
+ * They must use {@link ng.directive:ngApp ngApp}.
+ * </div>
+ *
+ * <div class="alert alert-warning">
+ * **Note:** Do not bootstrap the app on an element with a directive that uses {@link ng.$compile#transclusion transclusion},
+ * such as {@link ng.ngIf `ngIf`}, {@link ng.ngInclude `ngInclude`} and {@link ngRoute.ngView `ngView`}.
+ * Doing this misplaces the app {@link ng.$rootElement `$rootElement`} and the app's {@link auto.$injector injector},
+ * causing animations to stop working and making the injector inaccessible from outside the app.
+ * </div>
  *
  * ```html
  * <!doctype html>
@@ -1678,7 +1713,6 @@ function snake_case(name, separator) {
 }
 
 var bindJQueryFired = false;
-var skipDestroyOnNextJQueryCleanData;
 function bindJQuery() {
   var originalCleanData;
 
@@ -1712,15 +1746,11 @@ function bindJQuery() {
     originalCleanData = jQuery.cleanData;
     jQuery.cleanData = function(elems) {
       var events;
-      if (!skipDestroyOnNextJQueryCleanData) {
-        for (var i = 0, elem; (elem = elems[i]) != null; i++) {
-          events = jQuery._data(elem, "events");
-          if (events && events.$destroy) {
-            jQuery(elem).triggerHandler('$destroy');
-          }
+      for (var i = 0, elem; (elem = elems[i]) != null; i++) {
+        events = jQuery._data(elem, "events");
+        if (events && events.$destroy) {
+          jQuery(elem).triggerHandler('$destroy');
         }
-      } else {
-        skipDestroyOnNextJQueryCleanData = false;
       }
       originalCleanData(elems);
     };

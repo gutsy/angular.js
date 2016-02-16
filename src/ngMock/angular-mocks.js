@@ -545,7 +545,7 @@ angular.mock.$IntervalProvider = function() {
  * This directive should go inside the anonymous function but a bug in JSHint means that it would
  * not be enacted early enough to prevent the warning.
  */
-var R_ISO8061_STR = /^(\d{4})-?(\d\d)-?(\d\d)(?:T(\d\d)(?:\:?(\d\d)(?:\:?(\d\d)(?:\.(\d{3}))?)?)?(Z|([+-])(\d\d):?(\d\d)))?$/;
+var R_ISO8061_STR = /^(-?\d{4})-?(\d\d)-?(\d\d)(?:T(\d\d)(?:\:?(\d\d)(?:\:?(\d\d)(?:\.(\d{3}))?)?)?(Z|([+-])(\d\d):?(\d\d)))?$/;
 
 function jsonStringToDate(string) {
   var match;
@@ -571,7 +571,7 @@ function toInt(str) {
   return parseInt(str, 10);
 }
 
-function padNumber(num, digits, trim) {
+function padNumberInMock(num, digits, trim) {
   var neg = '';
   if (num < 0) {
     neg =  '-';
@@ -720,13 +720,13 @@ angular.mock.TzDate = function(offset, timestamp) {
   // provide this method only on browsers that already have it
   if (self.toISOString) {
     self.toISOString = function() {
-      return padNumber(self.origDate.getUTCFullYear(), 4) + '-' +
-            padNumber(self.origDate.getUTCMonth() + 1, 2) + '-' +
-            padNumber(self.origDate.getUTCDate(), 2) + 'T' +
-            padNumber(self.origDate.getUTCHours(), 2) + ':' +
-            padNumber(self.origDate.getUTCMinutes(), 2) + ':' +
-            padNumber(self.origDate.getUTCSeconds(), 2) + '.' +
-            padNumber(self.origDate.getUTCMilliseconds(), 3) + 'Z';
+      return padNumberInMock(self.origDate.getUTCFullYear(), 4) + '-' +
+            padNumberInMock(self.origDate.getUTCMonth() + 1, 2) + '-' +
+            padNumberInMock(self.origDate.getUTCDate(), 2) + 'T' +
+            padNumberInMock(self.origDate.getUTCHours(), 2) + ':' +
+            padNumberInMock(self.origDate.getUTCMinutes(), 2) + ':' +
+            padNumberInMock(self.origDate.getUTCSeconds(), 2) + '.' +
+            padNumberInMock(self.origDate.getUTCMilliseconds(), 3) + 'Z';
     };
   }
 
@@ -751,6 +751,15 @@ angular.mock.TzDate = function(offset, timestamp) {
 angular.mock.TzDate.prototype = Date.prototype;
 /* jshint +W101 */
 
+
+/**
+ * @ngdoc service
+ * @name $animate
+ *
+ * @description
+ * Mock implementation of the {@link ng.$animate `$animate`} service. Exposes two additional methods
+ * for testing animations.
+ */
 angular.mock.animate = angular.module('ngAnimateMock', ['ng'])
 
   .config(['$provide', function($provide) {
@@ -783,9 +792,50 @@ angular.mock.animate = angular.module('ngAnimateMock', ['ng'])
       return queueFn;
     });
 
-    $provide.decorator('$animate', ['$delegate', '$timeout', '$browser', '$$rAF',
+    $provide.decorator('$$animateJs', ['$delegate', function($delegate) {
+      var runners = [];
+
+      var animateJsConstructor = function() {
+        var animator = $delegate.apply($delegate, arguments);
+        // If no javascript animation is found, animator is undefined
+        if (animator) {
+          runners.push(animator);
+        }
+        return animator;
+      };
+
+      animateJsConstructor.$closeAndFlush = function() {
+        runners.forEach(function(runner) {
+          runner.end();
+        });
+        runners = [];
+      };
+
+      return animateJsConstructor;
+    }]);
+
+    $provide.decorator('$animateCss', ['$delegate', function($delegate) {
+      var runners = [];
+
+      var animateCssConstructor = function(element, options) {
+        var animator = $delegate(element, options);
+        runners.push(animator);
+        return animator;
+      };
+
+      animateCssConstructor.$closeAndFlush = function() {
+        runners.forEach(function(runner) {
+          runner.end();
+        });
+        runners = [];
+      };
+
+      return animateCssConstructor;
+    }]);
+
+    $provide.decorator('$animate', ['$delegate', '$timeout', '$browser', '$$rAF', '$animateCss', '$$animateJs',
                                     '$$forceReflow', '$$animateAsyncRun', '$rootScope',
-                            function($delegate,   $timeout,   $browser,   $$rAF,
+                            function($delegate,   $timeout,   $browser,   $$rAF,   $animateCss,   $$animateJs,
                                      $$forceReflow,   $$animateAsyncRun,  $rootScope) {
       var animate = {
         queue: [],
@@ -797,7 +847,35 @@ angular.mock.animate = angular.module('ngAnimateMock', ['ng'])
           return $$forceReflow.totalReflows;
         },
         enabled: $delegate.enabled,
-        flush: function() {
+        /**
+         * @ngdoc method
+         * @name $animate#closeAndFlush
+         * @description
+         *
+         * This method will close all pending animations (both {@link ngAnimate#javascript-based-animations Javascript}
+         * and {@link ngAnimate.$animateCss CSS}) and it will also flush any remaining animation frames and/or callbacks.
+         */
+        closeAndFlush: function() {
+          // we allow the flush command to swallow the errors
+          // because depending on whether CSS or JS animations are
+          // used, there may not be a RAF flush. The primary flush
+          // at the end of this function must throw an exception
+          // because it will track if there were pending animations
+          this.flush(true);
+          $animateCss.$closeAndFlush();
+          $$animateJs.$closeAndFlush();
+          this.flush();
+        },
+        /**
+         * @ngdoc method
+         * @name $animate#flush
+         * @description
+         *
+         * This method is used to flush the pending callbacks and animation frames to either start
+         * an animation or conclude an animation. Note that this will not actually close an
+         * actively running animation (see {@link ngMock.$animate#closeAndFlush `closeAndFlush()`} for that).
+         */
+        flush: function(hideErrors) {
           $rootScope.$digest();
 
           var doNextRun, somethingFlushed = false;
@@ -814,7 +892,7 @@ angular.mock.animate = angular.module('ngAnimateMock', ['ng'])
             }
           } while (doNextRun);
 
-          if (!somethingFlushed) {
+          if (!somethingFlushed && !hideErrors) {
             throw new Error('No pending animations ready to be closed or flushed');
           }
 
@@ -1023,18 +1101,18 @@ angular.mock.dump = function(object) {
   function MyController($scope, $http) {
     var authToken;
 
-    $http.get('/auth.py').success(function(data, status, headers) {
-      authToken = headers('A-Token');
-      $scope.user = data;
+    $http.get('/auth.py').then(function(response) {
+      authToken = response.headers('A-Token');
+      $scope.user = response.data;
     });
 
     $scope.saveMessage = function(message) {
       var headers = { 'Authorization': authToken };
       $scope.status = 'Saving...';
 
-      $http.post('/add-msg.py', message, { headers: headers } ).success(function(response) {
+      $http.post('/add-msg.py', message, { headers: headers } ).then(function(response) {
         $scope.status = '';
-      }).error(function() {
+      }).catch(function() {
         $scope.status = 'Failed...';
       });
     };
@@ -1243,7 +1321,8 @@ function createHttpBackendMock($rootScope, $timeout, $delegate, $browser) {
   }
 
   // TODO(vojta): change params to: method, url, data, headers, callback
-  function $httpBackend(method, url, data, callback, headers, timeout, withCredentials) {
+  function $httpBackend(method, url, data, callback, headers, timeout, withCredentials, responseType) {
+
     var xhr = new MockXhr(),
         expectation = expectations[0],
         wasExpected = false;
@@ -1307,7 +1386,7 @@ function createHttpBackendMock($rootScope, $timeout, $delegate, $browser) {
           // if $browser specified, we do auto flush all requests
           ($browser ? $browser.defer : responsesPush)(wrapResponse(definition));
         } else if (definition.passThrough) {
-          $delegate(method, url, data, callback, headers, timeout, withCredentials);
+          $delegate(method, url, data, callback, headers, timeout, withCredentials, responseType);
         } else throw new Error('No response defined !');
         return;
       }
@@ -2011,9 +2090,9 @@ angular.mock.$RAFDecorator = ['$delegate', function($delegate) {
  *
  */
 angular.mock.$RootElementProvider = function() {
-  this.$get = function() {
-    return angular.element('<div ng-app></div>');
-  };
+  this.$get = ['$injector', function($injector) {
+    return angular.element('<div ng-app></div>').data('$injector', $injector);
+  }];
 };
 
 /**
@@ -2040,7 +2119,7 @@ angular.mock.$RootElementProvider = function() {
  *
  * // Controller definition ...
  *
- * myMod.controller('MyDirectiveController', ['log', function($log) {
+ * myMod.controller('MyDirectiveController', ['$log', function($log) {
  *   $log.info(this.name);
  * })];
  *
@@ -2086,6 +2165,47 @@ angular.mock.$ControllerDecorator = ['$delegate', function($delegate) {
   };
 }];
 
+/**
+ * @ngdoc service
+ * @name $componentController
+ * @description
+ * A service that can be used to create instances of component controllers.
+ * <div class="alert alert-info">
+ * Be aware that the controller will be instantiated and attached to the scope as specified in
+ * the component definition object. That means that you must always provide a `$scope` object
+ * in the `locals` param.
+ * </div>
+ * @param {string} componentName the name of the component whose controller we want to instantiate
+ * @param {Object} locals Injection locals for Controller.
+ * @param {Object=} bindings Properties to add to the controller before invoking the constructor. This is used
+ *                           to simulate the `bindToController` feature and simplify certain kinds of tests.
+ * @param {string=} ident Override the property name to use when attaching the controller to the scope.
+ * @return {Object} Instance of requested controller.
+ */
+angular.mock.$ComponentControllerProvider = ['$compileProvider', function($compileProvider) {
+  this.$get = ['$controller','$injector', function($controller,$injector) {
+    return function $componentController(componentName, locals, bindings, ident) {
+      // get all directives associated to the component name
+      var directives = $injector.get(componentName + 'Directive');
+      // look for those directives that are components
+      var candidateDirectives = directives.filter(function(directiveInfo) {
+        // components have controller, controllerAs and restrict:'E'
+        return directiveInfo.controller && directiveInfo.controllerAs && directiveInfo.restrict === 'E';
+      });
+      // check if valid directives found
+      if (candidateDirectives.length === 0) {
+        throw new Error('No component found');
+      }
+      if (candidateDirectives.length > 1) {
+        throw new Error('Too many components found');
+      }
+      // get the info of the component
+      var directiveInfo = candidateDirectives[0];
+      return $controller(directiveInfo.controller, locals, bindings, ident || directiveInfo.controllerAs);
+    };
+  }];
+}];
+
 
 /**
  * @ngdoc module
@@ -2109,7 +2229,8 @@ angular.module('ngMock', ['ng']).provider({
   $log: angular.mock.$LogProvider,
   $interval: angular.mock.$IntervalProvider,
   $httpBackend: angular.mock.$HttpBackendProvider,
-  $rootElement: angular.mock.$RootElementProvider
+  $rootElement: angular.mock.$RootElementProvider,
+  $componentController: angular.mock.$ComponentControllerProvider
 }).config(['$provide', function($provide) {
   $provide.decorator('$timeout', angular.mock.$TimeoutDecorator);
   $provide.decorator('$$rAF', angular.mock.$RAFDecorator);
@@ -2475,10 +2596,12 @@ if (window.jasmine || window.mocha) {
 
     currentSpec.$injector = null;
     currentSpec.$modules = null;
+    currentSpec.$providerInjector = null;
     currentSpec = null;
 
     if (injector) {
       injector.get('$rootElement').off();
+      injector.get('$rootScope').$destroy();
     }
 
     // clean up jquery's fragment cache
@@ -2510,8 +2633,9 @@ if (window.jasmine || window.mocha) {
    * @param {...(string|Function|Object)} fns any number of modules which are represented as string
    *        aliases or as anonymous module initialization functions. The modules are used to
    *        configure the injector. The 'ng' and 'ngMock' modules are automatically loaded. If an
-   *        object literal is passed they will be registered as values in the module, the key being
-   *        the module name and the value being what is returned.
+   *        object literal is passed each key-value pair will be registered on the module via
+   *        {@link auto.$provide $provide}.value, the key being the string name (or token) to associate
+   *        with the value on the injector.
    */
   window.module = angular.mock.module = function() {
     var moduleFns = Array.prototype.slice.call(arguments, 0);
